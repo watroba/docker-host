@@ -1,0 +1,527 @@
+---
+version: '3.6'
+
+# --------------------------------------------------------------------------------
+#   Networking
+# --------------------------------------------------------------------------------
+# NOTE: Specifying the name key ensure that the project name is not
+# prepended to the name of the network. Greatly improves maintainability
+# and usability across compose files and projects
+networks:
+  # For routing traffic outside of the instance
+  traefik-public:
+    name: traefik-public
+    external: false
+  # Docker network only comms routed through traefik
+  management-network:
+    name: management-network
+    external: false
+  # Network for media backend
+  media-backend:
+    name: media-backend
+    external: false
+  # Network for comms between shlink containers
+  shlink-backend:
+    name: shlink-backend
+    external: false
+  # Network for interacting with LDAP server.
+  # NOTE: This is less usefull without an LDAP manager app, but still worth keeping
+  # around, I think. Reevaluate at a later date.
+  ldap-network:
+    name: ldap-network
+    external: false
+
+# --------------------------------------------------------------------------------
+#   Secrets
+# --------------------------------------------------------------------------------
+secrets:
+  # --- Authelia secrets ---
+  jwt:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/jwt"
+  duo:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/duo"
+  session:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/session"
+  redis:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/redis"
+  smtp:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/smtp"
+  ldap:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/ldap"
+  # --- OpenLDAP secrets ---
+  ldap-admin:
+    file: "${COMPUTEDIR}/docker/openldap/secrets/ldap-admin"
+  ldap-config:
+    file: "${COMPUTEDIR}/docker/openldap/secrets/ldap-config"
+  ldap-ro:
+    file: "${COMPUTEDIR}/docker/openldap/secrets/ldap-ro"
+
+# --------------------------------------------------------------------------------
+#   Services
+# --------------------------------------------------------------------------------
+services:
+
+# --------------------------------------------------------------------------------
+#   Management
+# --------------------------------------------------------------------------------
+
+# ---------------- OpenLDAP ------------------
+  openldap:
+    image: osixia/openldap
+    container_name: openldap
+    hostname: openldap
+    restart: unless-stopped
+    secrets:
+      - ldap-admin
+      - ldap-config
+      - ldap-ro
+    networks:
+      - ldap-network
+    ports:
+      - 389:389
+      - 636:636
+    volumes:
+      - "${COMPUTEDIR}/docker/openldap/slapd/config:/etc/ldap/slapd.d"
+      - "${COMPUTEDIR}/docker/openldap/slapd/database:/var/lib/ldap"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+      - "LDAP_OPENLDAP_UID=${PUID}"
+      - "LDAP_OPENLDAP_GID=${PGID}"
+      - "LDAP_ORGANISATION=$COMPANY"
+      - "LDAP_DOMAIN=$DOMAIN"
+      - "LDAP_ADMIN_PASSWORD_FILE=/run/secrets/ldap-admin"
+      - "LDAP_CONFIG_PASSWORD_FILE=/run/secrets/ldap-config"
+      - "LDAP_READONLY_USER=true"
+      - "LDAP_READONLY_USER_USERNAME=ldap-ro"
+      - "LDAP_READONLY_USER_PASSWORD_FILE=/run/secrets/ldap-ro"
+      - "LDAP_RFC2307BIS_SCHEMA=true"
+      - "LDAP_TLS_VERIFY_CLIENT=never"
+    labels:
+      - traefik.enable=false
+
+# ------------- Authelia  --------------
+# Description:
+#   SSO via Forward Auth
+  authelia:
+    image: authelia/authelia:latest
+    container_name: authelia
+    hostname: authelia
+    restart: always
+    depends_on: 
+      - openldap
+    secrets:
+      - jwt
+      - ldap-ro
+    networks:
+      - traefik-public
+      - ldap-network
+    ports:
+      - 9091:9091
+    volumes:
+      - "${COMPUTEDIR}/docker/authelia:/config"
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}"
+      - AUTHELIA_JWT_SECRET_FILE=/run/secrets/jwt
+      # - AUTHELIA_DUO_API_SECRET_KEY_FILE=/run/secrets/duo
+      # - AUTHELIA_SESSION_SECRET_FILE=/run/secrets/session
+      # - AUTHELIA_SESSION_REDIS_PASSWORD_FILE=/run/secrets/redis
+      # - AUTHELIA_STORAGE_MYSQL_PASSWORD_FILE=/run/secrets/mysql
+      # - AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE=/run/secrets/smtp
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/run/secrets/ldap-ro
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.authelia.entrypoints=websecure
+      - traefik.http.routers.authelia.rule=Host(`sso.$DOMAIN`)
+      - traefik.http.routers.authelia.tls=true
+      - traefik.http.routers.authelia.tls.certresolver=letsencrypt
+      - traefik.http.services.authelia.loadbalancer.server.port=9091
+      - >-
+        traefik.http.middlewares.authelia.forwardauth.address=http://authelia:9091/api/verify?rd=https://sso.${DOMAIN}
+      - traefik.http.middlewares.authelia.forwardauth.trustForwardHeader=true
+      - >-
+        traefik.http.middlewares.authelia.forwardauth.authResponseHeaders=Remote-User,Remote-Groups,Remote-Name,Remote-Email
+
+# -------------- Traefik ----------------
+# Description:
+#   Traefik (pronounced Traffic) is a reverse traefik-public that auto-detects 
+#   containers based on their labels and automatically routes connections to 
+#   them.
+#
+# TODO: Eliminated traefik.yaml by adding commands to this container similar to:
+#  https://github.com/authelia/authelia/blob/1e69bc283506b12c6a97f904c3651f5b24336ee3/examples/compose/local/docker-compose.yml#L52
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    hostname: traefik
+    restart: unless-stopped
+    depends_on: 
+      - authelia
+    networks:
+      - traefik-public
+      #- management-network # Commenting out to isolate the backend network
+    ports:
+      - 80:80
+      - 443:443
+      - 7000:8080
+    volumes:
+      - "${COMPUTEDIR}/docker/traefik:/etc/traefik"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.traefik.entrypoints=websecure
+      - traefik.http.routers.traefik.tls=true
+      - traefik.http.routers.traefik.tls.certresolver=letsencrypt
+      - traefik.http.routers.traefik.rule=Host(`traefik.$DOMAIN`)
+      # Expose the dashboard
+      - traefik.http.routers.traefik.service=api@internal
+      - traefik.http.routers.traefik.middlewares=authelia@docker
+
+# -------------- Portainer -----------------
+# Description:
+#   Container management user interface
+  portainer:
+    image: portainer/portainer:latest
+    container_name: portainer
+    hostname: portainer
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      # - management-network # Commenting out to isolate the backend network
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "${COMPUTEDIR}/docker/portainer/data:/data"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+    # Note: If changing this password, remove the portainer data so
+    # it'll be reset correctly.
+    command: >- 
+      --admin-password ${PORTAINER_PASS}
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.portainer.entrypoints=websecure
+      - traefik.http.routers.portainer.rule=Host(`portainer.$DOMAIN`)
+      - traefik.http.routers.portainer.tls=true
+      - traefik.http.routers.portainer.tls.certresolver=letsencrypt
+      # Note: This port is the INTERNAL container port.
+      - traefik.http.services.portainer.loadbalancer.server.port=9000
+      - traefik.http.routers.traefik.middlewares=known-ips
+      - >-
+        traefik.http.middlewares.known-ips.ipwhitelist.sourcerange=
+        127.0.0.1/32, 192.168.2.0/24
+
+# -------------- Watchtower ----------------
+# Description:
+#   Automatic container updater
+# Notes: 
+#   No networking
+  watchtower:
+    image: v2tec/watchtower
+    container_name: watchtower
+    hostname: watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Run at 4am every day and remove old images
+    command: --schedule "0 4 0 * * *" --cleanup 
+    labels:
+      - traefik.enable=false
+
+# --------------------------------------------------------------------------------
+#   Media
+# --------------------------------------------------------------------------------
+
+# ---------------- Sabnzbd -----------------
+# Description:
+#   Usenet media downloader
+  sabnzbd:
+    image: linuxserver/sabnzbd
+    container_name: sabnzbd
+    hostname: sabnzbd
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      - media-backend
+    ports:
+      - 7772:8080
+    volumes:
+      - "${COMPUTEDIR}/docker/sabnzbd:/config"
+      - "${DATADIR}/downloads:/downloads"
+      - "${TEMPDIR}/incomplete:/incomplete-downloads"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}"  
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.sabnzbd.entrypoints=websecure
+      - traefik.http.routers.sabnzbd.rule=Host(`sabnzbd.$DOMAIN`)
+      - traefik.http.routers.sabnzbd.tls=true
+      - traefik.http.routers.sabnzbd.tls.certresolver=letsencrypt
+      - traefik.http.services.sabnzbd.loadbalancer.server.port=8080
+      - traefik.http.routers.sabnzbd.middlewares=authelia@docker
+
+# ----------------- Plex -------------------
+# Description:
+#   Home media server
+  plex:
+    image: plexinc/pms-docker
+    container_name: plex
+    hostname: plex
+    restart: unless-stopped
+    networks:
+      - traefik-public
+    ports:
+      # For local streaming funsies
+      # Access to Plex (required)
+      - 32400:32400/tcp
+      # Plex DLNA
+      - 1900:1900/udp
+      - 32469:32469/tcp
+      # Plex Home Teater control via Plex Companion
+      - 3005:3005/tcp
+      # Bonjour/Avahi network discovery
+      - 5353:5353/udp
+      # Controlling Plex for Roku via Plex Companion
+      - 8324:8324/tcp
+      # GDM network discovery
+      - 32410:32410/udp
+      - 32412:32412/udp
+      - 32413:32413/udp
+      - 32414:32414/udp
+    volumes:
+      - "${COMPUTEDIR}/docker/plex:/config"
+      - "${TEMPDIR}/transcode:/transcode"
+      - "${DATADIR}/media:/media"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+    environment:
+      - "ADVERTISE_IP:http://192.168.2.104:32400/,https://plex.${DOMAIN}"
+      - "HOSTNAME=plex"
+      - "PLEX_CLAIM=claim-UCUCmxkDy9Qoc3_tsv8z"
+      - "PLEX_UID=${PUID}"
+      - "PLEX_GID=${PGID}"
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.plex.entrypoints=websecure
+      - traefik.http.routers.plex.rule=Host(`plex.$DOMAIN`)
+      - traefik.http.routers.plex.tls=true
+      - traefik.http.routers.plex.tls.certresolver=letsencrypt
+      - traefik.http.services.plex.loadbalancer.server.port=32400
+      - traefik.http.routers.plex.service=plex
+      # Local network port funkiness support
+      - traefik.http.routers.plex-local.rule=HostRegexp(`.*:32400`)
+      - traefik.http.routers.plex-local.entrypoints=plex-local
+      - traefik.http.services.plex-local.loadbalancer.server.port=32400
+      - traefik.http.routers.plex-local.service=plex-local
+      
+
+# ---------------- Sonarr ------------------
+  sonarr:
+    image: linuxserver/sonarr
+    container_name: sonarr
+    hostname: sonarr
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      - media-backend
+    ports:
+      - 7773:8989
+    volumes:
+      - "${COMPUTEDIR}/docker/sonarr:/config"
+      - "${DATADIR}/downloads:/downloads"
+      - "${DATADIR}/media/tv:/tv"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - XDG_CONFIG_HOME=/config
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.sonarr.entrypoints=websecure
+      - traefik.http.routers.sonarr.rule=Host(`sonarr.$DOMAIN`)
+      - traefik.http.routers.sonarr.tls=true
+      - traefik.http.routers.sonarr.tls.certresolver=letsencrypt
+      - traefik.http.services.sonarr.loadbalancer.server.port=8989
+      - traefik.http.routers.sonarr.middlewares=authelia@docker
+
+# ---------------- Radarr ------------------
+  radarr:
+    image: linuxserver/radarr
+    container_name: radarr
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      - media-backend
+    ports:
+      - 7774:7878
+    volumes:
+      - "${COMPUTEDIR}/docker/radarr:/config"
+      - "${DATADIR}/downloads:/downloads"
+      - "${DATADIR}/media/movies:/movies"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.radarr.entrypoints=websecure
+      - traefik.http.routers.radarr.rule=Host(`radarr.$DOMAIN`)
+      - traefik.http.routers.radarr.tls=true
+      - traefik.http.routers.radarr.tls.certresolver=letsencrypt
+      - traefik.http.services.radarr.loadbalancer.server.port=7878
+      - traefik.http.routers.radarr.middlewares=authelia@docker
+      
+# ---------------- Lidarr ------------------
+  lidarr:
+    image: linuxserver/lidarr
+    container_name: lidarr
+    hostname: lidarr
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      - media-backend
+    ports:
+      - 7798:8686
+    volumes:
+      - "${COMPUTEDIR}/docker/lidarr:/config"
+      - "${DATADIR}/downloads:/downloads"
+      - "${DATADIR}/media/music:/music"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.lidarr.entrypoints=websecure
+      - traefik.http.routers.lidarr.rule=Host(`lidarr.$DOMAIN`)
+      - traefik.http.routers.lidarr.tls=true
+      - traefik.http.routers.lidarr.tls.certresolver=letsencrypt
+      - traefik.http.services.lidarr.loadbalancer.server.port=8686
+      - traefik.http.routers.lidarr.middlewares=authelia@docker
+
+# ---------------- Bazarr ------------------
+  bazarr:
+    image: linuxserver/bazarr
+    container_name: bazarr
+    hostname: bazarr
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      - media-backend
+    ports:
+      - 7799:6767
+    volumes:
+      - "${COMPUTEDIR}/docker/bazarr:/config"
+      - "${DATADIR}/media/tv:/tv"
+      - "${DATADIR}/media/movies:/movies"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.bazarr.entrypoints=websecure
+      - traefik.http.routers.bazarr.rule=Host(`bazarr.$DOMAIN`)
+      - traefik.http.routers.bazarr.tls=true
+      - traefik.http.routers.bazarr.tls.certresolver=letsencrypt
+      - traefik.http.services.bazarr.loadbalancer.server.port=6767
+      - traefik.http.routers.bazarr.middlewares=authelia@docker
+
+# --------------- Tautulli -----------------
+  tautulli:
+    image: linuxserver/tautulli
+    container_name: tautulli
+    hostname: tautulli
+    restart: unless-stopped
+    networks:
+      - traefik-public
+    ports:
+      - 7775:8181
+    volumes:
+      - "${COMPUTEDIR}/docker/tautulli/config:/config"
+      - "${COMPUTEDIR}/docker/tautulli/logs:/logs:ro"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.tautulli.entrypoints=websecure
+      - traefik.http.routers.tautulli.rule=Host(`tautulli.$DOMAIN`)
+      - traefik.http.routers.tautulli.tls=true
+      - traefik.http.routers.tautulli.tls.certresolver=letsencrypt
+      - traefik.http.services.tautulli.loadbalancer.server.port=8181
+      - traefik.http.routers.tautulli.middlewares=authelia@docker
+
+
+# ----------------- Ombi -------------------
+  ombi:
+    image: linuxserver/ombi
+    container_name: ombi
+    hostname: ombi
+    restart: unless-stopped
+    networks:
+      - traefik-public
+    ports:
+      - 7776:3579
+    volumes:
+      - "${COMPUTEDIR}/docker/ombi:/config"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.ombi.entrypoints=websecure
+      - >-
+        traefik.http.routers.ombi.rule=
+        Host(`ombi.$DOMAIN`) ||
+        Host(`request.$DOMAIN`) ||
+        Host(`requests.$DOMAIN`)
+      - traefik.http.routers.ombi.tls=true
+      - traefik.http.routers.ombi.tls.certresolver=letsencrypt
+      - traefik.http.services.ombi.loadbalancer.server.port=3579
+
+# --------------------------------------------------------------------------------
+#   Utility
+# --------------------------------------------------------------------------------

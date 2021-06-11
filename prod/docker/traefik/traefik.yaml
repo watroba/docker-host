@@ -1,0 +1,86 @@
+# --------------------------------------------------
+## Static Configuration
+# --------------------------------------------------
+
+# Bump logging up to INFO from default ERROR
+log:
+  level: DEBUG
+  filePath: "/etc/traefik/logs/traefik.log"
+
+accessLog:
+  filePath: /etc/traefik/access.log
+  bufferingSize: 1000
+
+# Enable the Traefik dashboard with basic authentication
+# TODO: Enable authentication
+api:
+  dashboard: true
+  insecure: true
+
+# Define external listeners and force HTTPS routing
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        # Using Let's Encrypt resolver
+        certResolver: leresolve
+        domains:
+        # NOTE::<domain update>: Make sure to update the domain here if using this as a template
+          - main: watroba.dev
+  plex-local:
+    address: ":32400/tcp"
+
+# Configure Docker Provider
+# Allows container configuration identification and routing
+# 
+# NOTE:  Docker 18.09+ can connect Traefik to daemon using SSH,
+# which is much more secure, but requires additionl configuration
+providers:
+  docker:
+    # endpoint: "ssh://traefik@192.168.2.5:2022"
+    endpoint: "unix:///var/run/docker.sock"
+    # Initialize the default network. Can override w/:
+    #  - traefik.docker.network
+    # for individual containers
+    network: proxy
+    # Update when containers are changed
+    watch: true
+    # Enforce using the exterally bound port of the container (...or not)
+    useBindPortIP: false
+    # Enforce requiring explicit allow to route to container
+    exposedByDefault: false
+    # Default rule is a subdomain as the name of the container
+    # NOTE::<domain update>: Make sure to update the domain here if using this as a template
+    defaultRule: "Host(`{{ index .Labels \"com.docker.compose.service\"}}.watroba.dev`)"
+
+# Let's Encrypt CA Resolver setup
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      caServer: https://acme-v02.api.letsencrypt.org/directory
+      # NOTE::<domain update>: Make sure to update the email here if using this as a template
+      email: jwatroba1994@gmail.com
+      storage: /etc/traefik/acme.json
+      httpChallenge:
+        entrypoint: web
+
+# Allowed ciphers for TLS
+tls:
+  options:
+    default:
+      sniStrict: true
+      minVersion: VersionTLS12
+      cipherSuites:
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256

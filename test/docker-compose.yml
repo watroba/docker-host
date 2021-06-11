@@ -1,0 +1,475 @@
+---
+version: '3.6'
+
+# ==========================================
+# ||             Networking               ||
+# ==========================================
+# Be mindful these are created, but only accessible with
+# the name of the project
+networks:
+  # For routing traffic outside of the instance
+  traefik-public:
+    name: traefik-public
+    external: true
+  # Docker network only comms routed through traefik
+  management-network:
+    name: management-network
+    external: true
+  # Network for media backend
+  media-backend:
+    name: media-backend
+    external: true
+  # Network for media backend
+  shlink-backend:
+    name: shlink-backend
+    external: true
+  ldap-network:
+      name: ldap-network
+      external: true
+
+
+# ==========================================
+# ||               Secrets                ||
+# ==========================================
+secrets:
+  # --- Authelia secrets ---
+  jwt:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/jwt"
+    external: true
+  duo:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/duo"
+    external: true
+  session:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/session"
+    external: true
+  redis:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/redis"
+    external: true
+  smtp:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/smtp"
+    external: true
+  ldap:
+    file: "${COMPUTEDIR}/docker/authelia/secrets/ldap"
+    external: true
+  # --- OpenLDAP secrets ---
+  ldap-admin:
+    file: "${COMPUTEDIR}/docker/openldap/secrets/ldap-admin"
+    external: true
+  ldap-config:
+    file: "${COMPUTEDIR}/docker/openldap/secrets/ldap-config"
+    external: true
+  ldap-ro:
+    file: "${COMPUTEDIR}/docker/openldap/secrets/ldap-ro"
+    external: true
+
+
+# ==========================================
+# ||              Services                ||
+# ==========================================
+services:
+
+# ==========================================
+# ||               Utility                ||
+# ==========================================
+# --------------- Nextcloud ----------------
+  nextcloud:
+    image: nextcloud
+    container_name: nextcloud
+    restart: unless-stopped
+    networks:
+      - traefik-public
+    ports:
+      - 8100:80
+      - 8101:443
+    links:
+      - mariadb
+    volumes:
+      - "${DATADIR}/nextcloud:/var/www/html"
+      - ${COMPUTEDIR}/docker/shared:/shared
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.nextcloud.entrypoints=websecure
+      - traefik.http.routers.nextcloud.rule=Host(`nextcloud.$DOMAIN`)
+      - traefik.http.routers.nextcloud.tls=true
+      - traefik.http.routers.nextcloud.tls.certresolver=letsencrypt
+      - traefik.http.services.nextcloud.loadbalancer.server.port=80
+      - traefik.http.routers.nextcloud.middlewares=authelia@docker
+
+# ---------------- Shlink -----------------
+# Description:
+#   Custom URL shortener
+  # shlink:
+  #   image: shlinkio/shlink:stable
+  #   container_name: shlink
+  #   hostname: shlink
+  #   restart: unless-stopped
+  #   #depends_on:
+  #     #- shlink-db
+  #   networks:
+  #     - shlink-backend
+  #   ports:
+  #     - 7780:8080
+  #   environment:
+  #     - "PUID=${PUID}"
+  #     - "PGID=${PGID}"
+  #     - "TZ=${TZ}"
+  #     - "SHORT_DOMAIN_HOST=link.${DOMAIN}"
+  #     - "SHORT_DOMAIN_SCHEMA=https"
+  #     # License key required for database inside shlink
+  #     # Primarily used for updates
+  #     # Reference: https://shlink.io/documentation/geolite-license-key/
+  #     - "GEOLITE_LICENSE_KEY=zqmTnN24b5Bn5bJ3"
+  #   labels:
+  #     - traefik.enable=true
+  #     - traefik.docker.network=traefik-public
+  #     - traefik.http.routers.shlink.entrypoints=websecure
+  #     - traefik.http.routers.shlink.rule=Host(`link.$DOMAIN`)
+  #     - traefik.http.routers.shlink.tls=true
+  #     - traefik.http.routers.shlink.tls.certresolver=letsencrypt
+  #     - traefik.http.services.shlink.loadbalancer.server.port=8080
+
+# # ---------------- Shlink -----------------
+# # Description:
+# #   Custom URL shortener
+#   shlink-db:
+#     image: postgres/postgres:label
+#     container_name: shlink-db
+#     hostname: shlink-db
+#     restart: unless-stopped
+#     networks:
+#       - shlink-backend
+#     ports:
+#       - 7780:8080
+#     environment:
+#       - "PUID=${PUID}"
+#       - "PGID=${PGID}"
+#       - "TZ=${TZ}"
+#       - "POSTGRES_PASSWORD="
+#       # License key required for database inside shlink
+#       # Primarily used for updates
+#       # Reference: https://shlink.io/documentation/geolite-license-key/
+#       - "GEOLITE_LICENSE_KEY=zqmTnN24b5Bn5bJ3"
+#     labels:
+#       - traefik.enable=true
+#       - traefik.docker.network=traefik-public
+#       - traefik.http.routers.shlink.entrypoints=websecure
+#       - traefik.http.routers.shlink.rule=Host(`link.$DOMAIN`)
+#       - traefik.http.routers.shlink.tls=true
+#       - traefik.http.routers.shlink.tls.certresolver=letsencrypt
+#       - traefik.http.services.shlink.loadbalancer.server.port=8080
+
+# ------------- Shlink Manager --------------
+# Description:
+#   Custom URL shortener
+  # shlink-mgmt:
+  #   image: shlinkio/shlink-web-client:stable
+  #   container_name: shlink-mgmt
+  #   hostname: shlink-mgmt
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - shlink
+  #   networks:
+  #     - traefik-public
+  #     - shlink-backend
+  #   ports:
+  #     - 7781:80
+  #   volumes:
+  #     - "${COMPUTEDIR}/docker/shlink/servers.json:/usr/share/nginx/html/servers.json"
+  #   environment:
+  #     - "PUID=${PUID}"
+  #     - "PGID=${PGID}"
+  #     - "TZ=${TZ}"
+  #     - "DB_DRIVER=postgres"
+  #     - "DB_NAME=shlink-db"
+  #     - "DB_USER=shlinky"
+  #     - "DB_PASSWORD=<insert password>
+  #     - "DB_HOST="
+  #     - "DB_PORT="
+  #   labels:
+  #     - traefik.enable=true
+  #     - traefik.docker.network=traefik-public
+  #     - traefik.http.routers.authelia.entrypoints=websecure
+  #     - traefik.http.routers.authelia.rule=Host(`authelia.$DOMAIN`)
+  #     - traefik.http.routers.authelia.tls=true
+  #     - traefik.http.routers.authelia.tls.certresolver=letsencrypt
+  #     - traefik.http.services.authelia.loadbalancer.server.port=80
+
+# # --------------- Organizr -----------------
+#   organizr:
+#     image: lsiocommunity/organizr
+#     container_name: organizr
+#     restart: always
+#     networks:
+#       - traefik-public
+#     ports:
+#       - 7002:80
+#     volumes:
+#       - "${COMPUTEDIR}/docker/organizr:/config"
+#       - "${COMPUTEDIR}/docker/shared:/shared"
+#     environment:
+#       - "PUID=${PUID}"
+#       - "PGID=${PGID}"
+#       - "TZ=${TZ}"
+#     labels:
+#       - traefik.backend=organizr
+#       - traefik.frontend.rule=Host:organizr.watroba.dev
+#       - traefik.docker.network=traefik-public
+#       - traefik.port=80
+
+
+# # --------------- NzbHydra -----------------
+# #  nzbhydra:
+# #    image: linuxserver/hydra2
+# #    container_name: nzbhydra
+# #    restart: always
+# #    networks:
+# #      - traefik-public
+# #    ports:
+# #      - 7016:5076
+# #    volumes:
+# #      - ${COMPUTEDIR}/docker/nzbhydra:/config
+# #      - "${DATADIR}/downloads:/downloads"
+# #      - ${COMPUTEDIR}/docker/shared:/shared
+# #    environment:
+# #      - PUID=${PUID}
+# #      - PGID=${PGID}
+# #      - TZ=${TZ}
+# #    labels:
+# #      - traefik.backend=nazbhydra
+# #      - traefik.frontend.rule=Host:nzbhydra.watroba.dev
+# #      - traefik.docker.network=traefik-public
+# #      - traefik.port=5076
+    
+# # NOTE: This is a pain in the ass for something I'm not using yet. Finish up
+# # later:
+# #
+# # References:
+# #  https://digitalmccullough.com/posts/setting-up-apache-guacamole-with-docker-stack.html
+# #
+# # # -------------- Adminer ----------------
+# #   adminer:
+# #     image: adminer
+# #     container_name: adminer
+# #     hostname: adminer
+# #     restart: always
+# #     links:
+# #       - mariadb
+# #     networks:
+# #       - traefik-public
+# #       - management-network
+# #     ports:
+# #       - 7001:8080
+# #     environment:
+# #       - ADMINER_DEFAULT_SERVER=mariadb
+# #     labels:
+# #       # - traefik.backend=adminer
+# #       # - traefik.frontend.rule=Host:adminer.watroba.dev
+# #       # - traefik.docker.network=traefik-public
+# #       # - traefik.port=8080
+# #       - traefik.enable=true
+# #       - traefik.docker.network=management-network
+# #       - traefik.http.routers.adminer.entrypoints=web,websecure
+# #       - traefik.http.routers.adminer.rule=Host(`adminer.$DOMAIN`)
+# #       - traefik.http.routers.adminer.tls=true
+# #       - traefik.http.routers.adminer.tls.certresolver=letsencrypt
+# #       - traefik.http.services.portainer.loadbalancer.server.port=7001
+
+# # # ----------------- Guacd -------------------
+# # # NOTE: No routing through traefik
+# #   guacd:
+# #     image: guacamole/guacd
+# #     container_name: guacd
+# #     restart: always
+# #     networks:
+# #       - management-network
+# #     labels:
+# #       - traefik.enable=false
+
+
+# # # ------------ Guacamole Server -------------
+# #   guacamole:
+# #     image: guacamole/guacamole
+# #     container_name: guacamole
+# #     restart: always
+# #     links:
+# #       - guacd
+# #     networks:
+# #       - traefik-public
+# #       - management-network
+# #     ports:
+# #       - 7003:8080
+# #     volumes:
+# #       - "${COMPUTEDIR}/docker/guacamole:/guac-home"
+# #     environment:
+# #       - GUACAMOLE_HOME=/guac-home
+# #       - GUACD_HOSTNAME=guacd
+# #     labels:
+# #       # - traefik.backend=guacamole
+# #       # - traefik.frontend.rule=Host:guacamole.watroba.dev
+# #       # - traefik.docker.network=traefik-public
+# #       # - traefik.port=8080
+# #       - traefik.enable=true
+# #       - traefik.docker.network=management-network,traefik-public
+# #       - traefik.http.routers.guacamole.entrypoints=web,websecure
+# #       - traefik.http.routers.guacamole.rule=Host(`guacamole.$DOMAIN`)
+# #       - traefik.http.routers.guacamole.tls=true
+# #       - traefik.http.routers.guacamole.tls.certresolver=letsencrypt
+# #       - traefik.http.services.guacamole.loadbalancer.server.port=7003
+
+# # # --------------- Mariadb ------------------
+# # # NOTE: Needed for adminer and guacamole
+# #   mariadb:
+# #     image: linuxserver/mariadb
+# #     container_name: mariadb
+# #     hostname: mariadb
+# #     restart: always
+# #     networks:
+# #       - management-network
+# #     ports:
+# #       - target: 3306
+# #         published: 3306
+# #         protocol: tcp
+# #         mode: host
+# #     volumes:
+# #       - "${COMPUTEDIR}/docker/mariadb:/config"
+# #       - "${COMPUTEDIR}/docker/mariadb/mysql:/var/lib/mysql"
+# #     environment:
+# #       - "MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}"
+# #       - "PUID=${PUID}"
+# #       - "PGID=${PGID}"
+# #       - "TZ=${TZ}"
+# #     labels:
+# #       - traefik.enable=false
+
+# # ==========================================
+# # ||                Misc                  ||
+# # ==========================================
+
+# # # ----------------- Nginx -------------------
+# #   nginx:
+# #     image: nginx
+# #     container_name: nginx
+# #     restart: always
+# #     networks:
+# #       - traefik-public
+# #     ports:
+# #       - 6969:80
+# #     volumes:
+# #       - "${COMPUTEDIR}/docker/nginx/www:/usr/share/nginx/html:ro"
+# #     labels:
+# #       - traefik.backend=nginx
+# #       - traefik.frontend.rule=Host:watroba.dev
+# #       - traefik.docker.network=traefik-public
+# #       - traefik.port=80
+
+# # # ---------------- SeaFile -----------------
+# #   seafile:
+# #     image: seafileltd/seafile
+# #     container_name: seafile
+# #     restart: always
+# #     networks:
+# #       - traefik-public
+# #       - management-network
+# #     ports:
+# #       - 7005:80
+# #     volumes:
+# #       - "${DATADIR}/seafile:/shared"
+# #     environment:
+# #       - SEAFILE_SERVER_HOSTNAME=seafile.watroba.dev
+# #       - SEAFILE_ADMIN_EMAIL=jwatroba1994@gmail.com
+# #     labels:
+# #       - traefik.backend=seafile
+# #       - traefik.frontend.rule=Host:seafile.watroba.dev
+# #       - traefik.docker.network=traefik-public
+# #       - traefik.port=80
+
+# # # ------------ Home Assistant --------------
+# #   homeassistant:
+# #     image: homeassistant/home-assistant
+# #     container_name: homeassistant
+# #     restart: always
+# #     networks:
+# #       - traefik-public
+# #     ports:
+# #       - 7006:8123
+# #     devices:
+# #       - /dev/ttyUSB0:/dev/ttyUSB0
+# #       - /dev/ttyUSB1:/dev/ttyUSB1
+# #       - /dev/ttyACM0:/dev/ttyACM0
+# #     volumes:
+# #       - "${COMPUTEDIR}/docker/homeassistant:/config"
+# #       - "${COMPUTEDIR}/docker/shared:/shared"
+# #       - /etc/localtime:/etc/localtime:ro
+# #     privileged: true
+# #     environment:
+# #       - "PUID=${PUID}"
+# #       - "PGID=${PGID}"
+# #       - "TZ=${TZ}"
+# #     labels:
+# #       - traefik.backend=homeassistant
+# #       - traefik.frontend.rule=Host:homeassistant.watroba.dev,ha.watroba.dev
+# #       - traefik.docker.network=traefik-public
+# #       - traefik.port=8123
+ 
+# #  # -------------- Mumble ----------------
+# #   mumble:
+# #     image: coppit/mumble-server
+# #     container_name: mumble
+# #     restart: always
+# #     networks:
+# #       - traefik-public
+# #     ports:
+# #       - 64738:64738
+# #       - 64738:64738/udp
+# #     volumes:
+# #       - "${COMPUTEDIR}/docker/mumble:/data"
+# #     labels:
+# #       - traefik.backend=mumble
+# #       - traefik.frontend.rule=Host:mumble.watroba.dev
+# #       - traefik.docker.network=traefik-public
+# #       - traefik.port=64738
+
+
+# # ----------------- Squid ------------------
+# #  squid:
+# #    image: sameersbn/squid
+# #    container_name: squid
+# #    restart: always
+# #    networks:
+# #      - traefik-public
+# #    ports:
+# #      - 7008:3218
+# #    volumes:
+# #      - ${COMPUTEDIR}/docker/squid:/etc/squid
+# #      - ${COMPUTEDIR}/docker/squid/cache:/var/spool/squid
+# #    labels:
+# #      - traefik.enabled=false
+# #      - traefik.backend=squid
+# #      - traefik.frontend.rule=Host:traefik-public.watroba.dev,squid.watroba.dev
+# #      - traefik.docker.network=traefik-public
+# #      - traefik.port=3218
+
+
+# # # ---------------- BookStack ---------------
+# #   bookstack:
+# #     image: solidnerd/bookstack
+# #     container_name: bookstack
+# #     restart: always
+# #     networks:
+# #       - management-network
+# #       - traefik-public
+# #     ports:
+# #       - 7007:80
+# #     environment:
+# #       - DB_HOST=mariadb:3306
+# #       - DB_USERNAME=bookstack
+# #       - "DB_PASSWORD=${MYSQL_ROOT_PASSWORD}"
+# #     labels:
+# #       - traefik.backend=bookstack
+# #       - traefik.frontend.rule=Host:bookstack.watroba.dev,bs.watroba.dev
+# #       - traefik.docker.network=traefik-public
+# #       - traefik.port=80
