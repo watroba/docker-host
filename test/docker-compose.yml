@@ -22,10 +22,13 @@ networks:
   # Network for media backend
   shlink-backend:
     name: shlink-backend
-    external: true
+    external: false
   ldap-network:
       name: ldap-network
       external: true
+  nextcloud-internal-network:
+      name: nextcloud-internal-network
+      external: false
 
 
 # ==========================================
@@ -61,6 +64,29 @@ secrets:
   ldap-ro:
     file: "${COMPUTEDIR}/docker/openldap/secrets/ldap-ro"
     external: true
+  # --- MariaDB secrets ---
+  mariadb-root:
+    file: "${COMPUTEDIR}/docker/nextcloud/secrets/mariadb-root"
+    external: false
+  mariadb-pass:
+    file: "${COMPUTEDIR}/docker/nextcloud/secrets/mariadb-pass"
+    external: false
+  nextcloud-admin-user:
+    file: "${COMPUTEDIR}/docker/nextcloud/secrets/nextcloud-admin-user"
+    external: false
+  nextcloud-admin-pass:
+    file: "${COMPUTEDIR}/docker/nextcloud/secrets/nextcloud-admin-pass"
+    external: false
+  # --- Shlink secrets ---
+  shlink-geolite-key:
+    file: "${COMPUTEDIR}/docker/shlink/secrets/shlink-geolite-key"
+    external: false
+  shlink-db-user:
+    file: "${COMPUTEDIR}/docker/shlink/secrets/shlink-db-user"
+    external: false
+  shlink-db-pass:
+    file: "${COMPUTEDIR}/docker/shlink/secrets/shlink-db-pass"
+    external: false
 
 
 # ==========================================
@@ -71,75 +97,243 @@ services:
 # ==========================================
 # ||               Utility                ||
 # ==========================================
-# --------------- Nextcloud ----------------
-  nextcloud:
-    image: nextcloud
-    container_name: nextcloud
+
+# ------------- Lazy Librarian -------------
+  lazylibrarian:
+    image: linuxserver/lazylibrarian
+    container_name: lazylibrarian
+    hostname: lazylibrarian
     restart: unless-stopped
     networks:
       - traefik-public
+      - media-backend
     ports:
-      - 8100:80
-      - 8101:443
-    links:
-      - mariadb
+      - 7900:5229
     volumes:
-      - "${DATADIR}/nextcloud:/var/www/html"
-      - ${COMPUTEDIR}/docker/shared:/shared
+      - "${COMPUTEDIR}/docker/lazylibrarian:/config"
+      - "${DATADIR}/downloads:/downloads"
+      - "${DATADIR}/media/books:/books"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
     environment:
-      - PUID=${PUID}
-      - PGID=${PGID}
+      - XDG_CONFIG_HOME=/config
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+      - "DOCKER_MODS=linuxserver/mods:lazylibrarian-ffmpeg"
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
-      - traefik.http.routers.nextcloud.entrypoints=websecure
-      - traefik.http.routers.nextcloud.rule=Host(`nextcloud.$DOMAIN`)
-      - traefik.http.routers.nextcloud.tls=true
-      - traefik.http.routers.nextcloud.tls.certresolver=letsencrypt
-      - traefik.http.services.nextcloud.loadbalancer.server.port=80
-      - traefik.http.routers.nextcloud.middlewares=authelia@docker
+      - traefik.http.routers.lazylibrarian.entrypoints=websecure
+      - traefik.http.routers.lazylibrarian.rule=Host(`lazylibrarian.$DOMAIN`)
+      - traefik.http.routers.lazylibrarian.tls=true
+      - traefik.http.routers.lazylibrarian.tls.certresolver=letsencrypt
+      - traefik.http.services.lazylibrarian.loadbalancer.server.port=5229
+      - traefik.http.routers.lazylibrarian.middlewares=authelia@docker
+
+# --------------- Calibre ---------------
+  calibre-server:
+    image: linuxserver/calibre
+    container_name: calibre-server
+    hostname: calibre-server
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      - media-backend
+    ports:
+      - 7100:8080
+      - 7101:8081
+    volumes:
+      - "${COMPUTEDIR}/docker/calibre-server:/config"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.calibre-server.entrypoints=websecure
+      - traefik.http.routers.calibre-server.rule=Host(`calibre-server.$DOMAIN`)
+      - traefik.http.routers.calibre-server.tls=true
+      - traefik.http.routers.calibre-server.tls.certresolver=letsencrypt
+      - traefik.http.services.calibre-server.loadbalancer.server.port=8080
+      - traefik.http.routers.calibre-server.middlewares=authelia@docker
+
+# --------------- Calibre ---------------
+  calibre-web:
+    image: linuxserver/calibre-web
+    container_name: calibre-web
+    hostname: calibre-web
+    restart: unless-stopped
+    networks:
+      - traefik-public
+      - media-backend
+    ports:
+      - 7102:8083
+    volumes:
+      # Uses the same config as calibre server
+      - "${COMPUTEDIR}/docker/calibre:/config"
+      - "${DATADIR}/media/books:/books"
+      - "${COMPUTEDIR}/docker/shared:/shared"
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}" 
+      - "DOCKER_MODS=linuxserver/calibre-web:calibre"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.calibre.entrypoints=websecure
+      - >-
+        traefik.http.routers.calibre.rule=
+        Host(`calibre.$DOMAIN`) ||
+        Host(`books.$DOMAIN`)
+      - traefik.http.routers.calibre.tls=true
+      - traefik.http.routers.calibre.tls.certresolver=letsencrypt
+      - traefik.http.services.calibre.loadbalancer.server.port=8083
+      - traefik.http.routers.calibre.middlewares=authelia@docker
+
+# # --------------- MariaDB ----------------
+#   nextcloud-db:
+#     image: mariadb
+#     container_name: nextcloud-db
+#     hostname: nextcloud-db
+#     restart: unless-stopped
+#     secrets:
+#       - mariadb-root
+#       - mariadb-pass
+#     networks:
+#       - nextcloud-internal-network
+#     ports:
+#       - 3306:3306
+#     command: >-
+#       --transaction-isolation=READ-COMMITTED
+#       --binlog-format=ROW
+#       --log-bin
+#       --log-basename=nextcloud-db
+#     volumes:
+#       - "${DATADIR}/nextcloud/db:/var/lib/mysql"
+#     environment:
+#       - MYSQL_ROOT_PASSWORD_FILE=/run/secrets/mariadb-root
+#       - MYSQL_PASSWORD_FILE=/run/secrets/mariadb-pass
+#       - MYSQL_DATABASE=nextcloud
+#       - MYSQL_USER=nextcloud
+#     labels:
+#       - traefik.enable=false
+
+# # --------------- Nextcloud ----------------
+#   nextcloud:
+#     image: nextcloud
+#     container_name: nextcloud
+#     hostname: nextcloud
+#     restart: unless-stopped
+#     depends_on: 
+#       - nextcloud-db
+#     secrets:
+#       - mariadb-pass
+#     networks:
+#       - traefik-public
+#       - nextcloud-internal-network
+#     ports:
+#       - 8100:80
+#       - 8101:443
+#     # links:
+#     #   - nextcloud-db
+#     volumes:
+#       - "${DATADIR}/nextcloud/site:/var/www/html"
+#       - "${COMPUTEDIR}/docker/shared:/shared"
+#     environment:
+#       - PUID=${PUID}
+#       - PGID=${PGID}
+#       # MariaDB config
+#       - "MYSQL_DATABASE=nextcloud"
+#       - "MYSQL_USER=nextcloud"
+#       - "MYSQL_PASSWORD_FILE=/run/secrets/mariadb-pass"
+#       - "MYSQL_HOST=nextcloud-db:3306"
+#       # Admin config
+#       - "NEXTCLOUD_ADMIN_USER_FILE=/run/secrets/nextcloud-admin-user"
+#       - "NEXTCLOUD_ADMIN_PASSWORD_FILE=/run/secrets/netcloud-admin-pass"
+#       # # Redis Config
+#       # - "REDIS_HOST="
+#       # - "REDIS_HOST_PORT="
+#       # - "REDIS_HOST_PASSWORD="
+#       # - "SMTP_HOST="
+#       # - "SMTP_SECURE="
+#       # - "SMTP_PORT="
+#       # - "SMTP_AUTHTYPE="
+#       # - "SMTP_NAME="
+#       # - "SMTP_PASSWORD="
+#       # - "MAIL_FROM_ADDRESS="
+#       # - "MAIL_DOMAIN="
+#     labels:
+#       - traefik.enable=true
+#       - traefik.docker.network=traefik-public
+#       - traefik.http.routers.nextcloud.entrypoints=websecure
+#       - traefik.http.routers.nextcloud.rule=Host(`nextcloud.$DOMAIN`)
+#       - traefik.http.routers.nextcloud.tls=true
+#       - traefik.http.routers.nextcloud.tls.certresolver=letsencrypt
+#       - traefik.http.services.nextcloud.loadbalancer.server.port=80
+#       - traefik.http.routers.nextcloud.middlewares=authelia@docker
 
 # ---------------- Shlink -----------------
 # Description:
 #   Custom URL shortener
-  # shlink:
-  #   image: shlinkio/shlink:stable
-  #   container_name: shlink
-  #   hostname: shlink
-  #   restart: unless-stopped
-  #   #depends_on:
-  #     #- shlink-db
-  #   networks:
-  #     - shlink-backend
-  #   ports:
-  #     - 7780:8080
-  #   environment:
-  #     - "PUID=${PUID}"
-  #     - "PGID=${PGID}"
-  #     - "TZ=${TZ}"
-  #     - "SHORT_DOMAIN_HOST=link.${DOMAIN}"
-  #     - "SHORT_DOMAIN_SCHEMA=https"
-  #     # License key required for database inside shlink
-  #     # Primarily used for updates
-  #     # Reference: https://shlink.io/documentation/geolite-license-key/
-  #     - "GEOLITE_LICENSE_KEY=zqmTnN24b5Bn5bJ3"
-  #   labels:
-  #     - traefik.enable=true
-  #     - traefik.docker.network=traefik-public
-  #     - traefik.http.routers.shlink.entrypoints=websecure
-  #     - traefik.http.routers.shlink.rule=Host(`link.$DOMAIN`)
-  #     - traefik.http.routers.shlink.tls=true
-  #     - traefik.http.routers.shlink.tls.certresolver=letsencrypt
-  #     - traefik.http.services.shlink.loadbalancer.server.port=8080
+  shlink:
+    image: shlinkio/shlink:stable
+    container_name: shlink
+    hostname: shlink
+    restart: unless-stopped
+    # depends_on:
+    #   - shlink-db
+    secrets:
+      - shlink-geolite-key
+      - shlink-db-user
+      - shlink-db-pass
+    networks:
+      - shlink-backend
+    ports:
+      - 7780:8080
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}"
+      - "SHORT_DOMAIN_HOST=link.${DOMAIN}"
+      - "SHORT_DOMAIN_SCHEMA=https"
+      - "BASE_PATH=link.${DOMAIN}"
+      # License key required for database inside shlink
+      # Primarily used for updates
+      # Reference: https://shlink.io/documentation/geolite-license-key/
+      - "GEOLITE_LICENSE_KEY_FILE=/run/secrets/shlink-geolite-key"
+      # - "DB_DRIVER=postgres"
+      # - "DB_NAME=shlink"
+      # - "DB_USER_FILE=/run/secrets/shlink-db-user"
+      # - "DB_PASSWORD=/run/secrets/shlink-db-pass"
+      # - "DB_HOST=shlink-db"
+      # - "DB_PORT=5432"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.shlink.entrypoints=websecure
+      - traefik.http.routers.shlink.rule=Host(`link.$DOMAIN`)
+      - traefik.http.routers.shlink.tls=true
+      - traefik.http.routers.shlink.tls.certresolver=letsencrypt
+      - traefik.http.services.shlink.loadbalancer.server.port=8080
 
 # # ---------------- Shlink -----------------
 # # Description:
 # #   Custom URL shortener
 #   shlink-db:
-#     image: postgres/postgres:label
+#     image: postgres/postgres:latest
 #     container_name: shlink-db
 #     hostname: shlink-db
 #     restart: unless-stopped
+#     secrets:
+#       - shlink-geolite-key
+#       - shlink-db-user
+#       - shlink-db-pass
 #     networks:
 #       - shlink-backend
 #     ports:
@@ -153,6 +347,12 @@ services:
 #       # Primarily used for updates
 #       # Reference: https://shlink.io/documentation/geolite-license-key/
 #       - "GEOLITE_LICENSE_KEY=zqmTnN24b5Bn5bJ3"
+        # - "DB_DRIVER=postgres"
+        # - "DB_NAME=shlink-db"
+        # - "DB_USER=shlinky"
+        # - "DB_PASSWORD=<insert password>
+        # - "DB_HOST="
+        # - "DB_PORT="
 #     labels:
 #       - traefik.enable=true
 #       - traefik.docker.network=traefik-public
@@ -165,38 +365,33 @@ services:
 # ------------- Shlink Manager --------------
 # Description:
 #   Custom URL shortener
-  # shlink-mgmt:
-  #   image: shlinkio/shlink-web-client:stable
-  #   container_name: shlink-mgmt
-  #   hostname: shlink-mgmt
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - shlink
-  #   networks:
-  #     - traefik-public
-  #     - shlink-backend
-  #   ports:
-  #     - 7781:80
-  #   volumes:
-  #     - "${COMPUTEDIR}/docker/shlink/servers.json:/usr/share/nginx/html/servers.json"
-  #   environment:
-  #     - "PUID=${PUID}"
-  #     - "PGID=${PGID}"
-  #     - "TZ=${TZ}"
-  #     - "DB_DRIVER=postgres"
-  #     - "DB_NAME=shlink-db"
-  #     - "DB_USER=shlinky"
-  #     - "DB_PASSWORD=<insert password>
-  #     - "DB_HOST="
-  #     - "DB_PORT="
-  #   labels:
-  #     - traefik.enable=true
-  #     - traefik.docker.network=traefik-public
-  #     - traefik.http.routers.authelia.entrypoints=websecure
-  #     - traefik.http.routers.authelia.rule=Host(`authelia.$DOMAIN`)
-  #     - traefik.http.routers.authelia.tls=true
-  #     - traefik.http.routers.authelia.tls.certresolver=letsencrypt
-  #     - traefik.http.services.authelia.loadbalancer.server.port=80
+  shlink-mgmt:
+    image: shlinkio/shlink-web-client:stable
+    container_name: shlink-mgmt
+    hostname: shlink-mgmt
+    restart: unless-stopped
+    depends_on:
+      - shlink
+    networks:
+      - traefik-public
+      - shlink-backend
+    ports:
+      - 7781:80
+    volumes:
+      - "${COMPUTEDIR}/docker/shlink/servers.json:/usr/share/nginx/html/servers.json"
+    environment:
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "TZ=${TZ}"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.routers.shlink-manager.entrypoints=websecure
+      - traefik.http.routers.shlink-manager.rule=Host(`shlink-manager.$DOMAIN`)
+      - traefik.http.routers.shlink-manager.tls=true
+      - traefik.http.routers.shlink-manager.tls.certresolver=letsencrypt
+      - traefik.http.services.shlink-manager.loadbalancer.server.port=80
+      - traefik.http.routers.shlink-manager.middlewares=authelia@docker
 
 # # --------------- Organizr -----------------
 #   organizr:

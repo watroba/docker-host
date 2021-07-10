@@ -4,7 +4,7 @@
 
 # Bump logging up to INFO from default ERROR
 log:
-  level: DEBUG
+  level: INFO
   filePath: "/etc/traefik/logs/traefik.log"
 
 accessLog:

@@ -35,7 +35,7 @@ server:
   path: ""
 
 ## Level of verbosity for logs: info, debug, trace.
-log_level: debug
+log_level: info
 
 ## Format the logs are written as: json, text.
 # log_format: json
@@ -261,7 +261,7 @@ authentication_backend:
 access_control:
   ## Default policy can either be 'bypass', 'one_factor', 'two_factor' or 'deny'. It is the policy applied to any
   ## resource if there is no policy to be applied to the user.
-  default_policy: one_factor
+  default_policy: deny
 
   networks:
     - name: internal
@@ -314,6 +314,32 @@ access_control:
       policy: one_factor
       subject: 
         - "group:tautulli"
+        - "group:media-admins"
+      networks:
+        - internal
+
+    - domain: 
+        - calibre.watroba.dev
+        - books.watroba.dev
+      policy: one_factor
+      subject: 
+        - "group:readers"
+        - "group:media-admins"
+      networks:
+        - internal
+
+    - domain: calibre-server.watroba.dev
+      policy: one_factor
+      subject: 
+        - "group:calibre"
+        - "group:media-admins"
+      networks:
+        - internal
+
+    - domain: lazylibrarian.watroba.dev
+      policy: one_factor
+      subject: 
+        - "group:lazylibrarian"
         - "group:media-admins"
       networks:
         - internal
